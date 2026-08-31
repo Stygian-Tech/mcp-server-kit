@@ -7,6 +7,7 @@ public enum MCPServerKitVersion {
 public enum MCPProtocolVersion: String, CaseIterable, Codable, Sendable {
   case v2024_11_05 = "2024-11-05"
   case v2025_06_18 = "2025-06-18"
+  case v2025_11_25 = "2025-11-25"
 
   public static let fallback = v2024_11_05
 
@@ -18,6 +19,77 @@ public enum MCPProtocolVersion: String, CaseIterable, Codable, Sendable {
       return fallback.rawValue
     }
     return version.rawValue
+  }
+}
+
+/// A recursive representation of a JSON value that preserves nested wire arguments.
+public enum MCPJSONValue: Codable, Equatable, Sendable {
+  case null
+  case bool(Bool)
+  case integer(Int)
+  case number(Double)
+  case string(String)
+  case array([MCPJSONValue])
+  case object([String: MCPJSONValue])
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+    } else if let value = try? container.decode(Bool.self) {
+      self = .bool(value)
+    } else if let value = try? container.decode(Int.self) {
+      self = .integer(value)
+    } else if let value = try? container.decode(Double.self) {
+      self = .number(value)
+    } else if let value = try? container.decode(String.self) {
+      self = .string(value)
+    } else if let value = try? container.decode([MCPJSONValue].self) {
+      self = .array(value)
+    } else if let value = try? container.decode([String: MCPJSONValue].self) {
+      self = .object(value)
+    } else {
+      throw DecodingError.dataCorruptedError(
+        in: container,
+        debugDescription: "Value is not valid JSON"
+      )
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    switch self {
+    case .null:
+      try container.encodeNil()
+    case .bool(let value):
+      try container.encode(value)
+    case .integer(let value):
+      try container.encode(value)
+    case .number(let value):
+      try container.encode(value)
+    case .string(let value):
+      try container.encode(value)
+    case .array(let value):
+      try container.encode(value)
+    case .object(let value):
+      try container.encode(value)
+    }
+  }
+
+  /// Returns the legacy string representation for scalar JSON values.
+  public var stringValue: String? {
+    switch self {
+    case .string(let value):
+      return value
+    case .integer(let value):
+      return String(value)
+    case .number(let value):
+      return String(value)
+    case .bool(let value):
+      return String(value)
+    case .null, .array, .object:
+      return nil
+    }
   }
 }
 
@@ -95,9 +167,17 @@ public struct MCPRequest: Codable, Equatable, Sendable {
 
 public struct MCPRequestParams: Codable, Equatable, Sendable {
   public let name: String?
-  public let arguments: [String: String]?
+  public let arguments: [String: MCPJSONValue]?
   public let uri: String?
   public let protocolVersion: String?
+
+  /// A compatibility view of scalar arguments used by pre-2025 handlers.
+  /// Nested objects, arrays, and null values are omitted.
+  public var stringArguments: [String: String]? {
+    guard let arguments else { return nil }
+    let values = arguments.compactMapValues(\.stringValue)
+    return values.isEmpty ? nil : values
+  }
 
   private enum CodingKeys: String, CodingKey {
     case name
@@ -108,7 +188,7 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
 
   public init(
     name: String?,
-    arguments: [String: String]?,
+    arguments: [String: MCPJSONValue]?,
     uri: String? = nil,
     protocolVersion: String? = nil
   ) {
@@ -118,12 +198,27 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     self.protocolVersion = protocolVersion
   }
 
+  /// Source-compatible convenience for callers that still construct scalar string arguments.
+  public init(
+    name: String?,
+    arguments: [String: String],
+    uri: String? = nil,
+    protocolVersion: String? = nil
+  ) {
+    self.init(
+      name: name,
+      arguments: arguments.mapValues(MCPJSONValue.string),
+      uri: uri,
+      protocolVersion: protocolVersion
+    )
+  }
+
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     name = try container.decodeIfPresent(String.self, forKey: .name)
     uri = try container.decodeIfPresent(String.self, forKey: .uri)
     protocolVersion = try container.decodeIfPresent(String.self, forKey: .protocolVersion)
-    arguments = try Self.decodeArguments(from: container)
+    arguments = try container.decodeIfPresent([String: MCPJSONValue].self, forKey: .arguments)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -134,54 +229,17 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     try container.encodeIfPresent(protocolVersion, forKey: .protocolVersion)
   }
 
-  private static func decodeArguments(
-    from container: KeyedDecodingContainer<CodingKeys>
-  ) throws -> [String: String]? {
-    if let arguments = try? container.decode([String: String].self, forKey: .arguments) {
-      return arguments
-    }
-    guard container.contains(.arguments) else {
-      return nil
-    }
-    let nested = try container.nestedContainer(keyedBy: DynamicCodingKey.self, forKey: .arguments)
-    var output: [String: String] = [:]
-    for key in nested.allKeys {
-      if let value = try? nested.decode(String.self, forKey: key) {
-        output[key.stringValue] = value
-      } else if let value = try? nested.decode(Int.self, forKey: key) {
-        output[key.stringValue] = String(value)
-      } else if let value = try? nested.decode(Bool.self, forKey: key) {
-        output[key.stringValue] = String(value)
-      } else if let value = try? nested.decode(Double.self, forKey: key) {
-        output[key.stringValue] = String(value)
-      }
-    }
-    return output.isEmpty ? nil : output
-  }
-}
-
-private struct DynamicCodingKey: CodingKey {
-  let stringValue: String
-  let intValue: Int?
-
-  init?(stringValue: String) {
-    self.stringValue = stringValue
-    self.intValue = nil
-  }
-
-  init?(intValue: Int) {
-    self.stringValue = String(intValue)
-    self.intValue = intValue
-  }
 }
 
 public struct MCPErrorObject: Codable, Equatable, Sendable {
   public let code: Int
   public let message: String
+  public let data: MCPJSONValue?
 
-  public init(code: Int, message: String) {
+  public init(code: Int, message: String, data: MCPJSONValue? = nil) {
     self.code = code
     self.message = message
+    self.data = data
   }
 }
 
@@ -288,50 +346,287 @@ public struct MCPServerInfo: Codable, Equatable, Sendable {
 
 public struct MCPToolsListResult: Codable, Equatable, Sendable {
   public let tools: [MCPTool]
+  public let nextCursor: String?
 
-  public init(tools: [MCPTool]) {
+  public init(tools: [MCPTool], nextCursor: String? = nil) {
     self.tools = tools
+    self.nextCursor = nextCursor
   }
 }
 
 public struct MCPTool: Codable, Equatable, Sendable {
   public let name: String
+  public let title: String?
   public let description: String?
   public let inputSchema: MCPInputSchema?
+  public let outputSchema: MCPInputSchema?
+  public let icons: [MCPToolIcon]?
+  public let annotations: MCPToolAnnotations?
 
-  public init(name: String, description: String?, inputSchema: MCPInputSchema?) {
+  public init(
+    name: String,
+    description: String?,
+    inputSchema: MCPInputSchema?,
+    title: String? = nil,
+    outputSchema: MCPInputSchema? = nil,
+    icons: [MCPToolIcon]? = nil,
+    annotations: MCPToolAnnotations? = nil
+  ) {
     self.name = name
+    self.title = title
     self.description = description
     self.inputSchema = inputSchema
+    self.outputSchema = outputSchema
+    self.icons = icons
+    self.annotations = annotations
   }
 }
 
-public struct MCPInputSchema: Codable, Equatable, Sendable {
-  public let type: String
-  public let properties: [String: MCPPropertySchema]?
+public struct MCPToolIcon: Codable, Equatable, Sendable {
+  public let src: String
+  public let mimeType: String?
+  public let sizes: [String]?
+  public let theme: String?
 
-  public init(type: String, properties: [String: MCPPropertySchema]?) {
-    self.type = type
-    self.properties = properties
+  public init(src: String, mimeType: String? = nil, sizes: [String]? = nil, theme: String? = nil) {
+    self.src = src
+    self.mimeType = mimeType
+    self.sizes = sizes
+    self.theme = theme
+  }
+}
+
+public struct MCPToolAnnotations: Codable, Equatable, Sendable {
+  public let title: String?
+  public let readOnlyHint: Bool?
+  public let destructiveHint: Bool?
+  public let idempotentHint: Bool?
+  public let openWorldHint: Bool?
+
+  public init(
+    title: String? = nil,
+    readOnlyHint: Bool? = nil,
+    destructiveHint: Bool? = nil,
+    idempotentHint: Bool? = nil,
+    openWorldHint: Bool? = nil
+  ) {
+    self.title = title
+    self.readOnlyHint = readOnlyHint
+    self.destructiveHint = destructiveHint
+    self.idempotentHint = idempotentHint
+    self.openWorldHint = openWorldHint
+  }
+}
+
+/// JSON Schema subset used by MCP tool input and output declarations.
+/// This is a reference type so schemas can recursively describe objects and arrays.
+public final class MCPJSONSchema: Codable, Equatable, Sendable {
+  public let type: String?
+  public let description: String?
+  public let properties: [String: MCPJSONSchema]?
+  public let required: [String]?
+  public let enumValues: [MCPJSONValue]?
+  public let items: MCPJSONSchema?
+  public let additionalProperties: Bool?
+  public let minimum: Double?
+  public let maximum: Double?
+  public let exclusiveMinimum: Double?
+  public let exclusiveMaximum: Double?
+  public let minLength: Int?
+  public let maxLength: Int?
+  public let pattern: String?
+  public let format: String?
+  public let minItems: Int?
+  public let maxItems: Int?
+  public let uniqueItems: Bool?
+
+  private enum CodingKeys: String, CodingKey {
+    case type
+    case description
+    case properties
+    case required
+    case enumValues = "enum"
+    case items
+    case additionalProperties
+    case minimum
+    case maximum
+    case exclusiveMinimum
+    case exclusiveMaximum
+    case minLength
+    case maxLength
+    case pattern
+    case format
+    case minItems
+    case maxItems
+    case uniqueItems
   }
 
-  public static func fromCapabilitySchemaJson(_ raw: String?) -> MCPInputSchema {
+  public init(
+    type: String? = nil,
+    properties: [String: MCPJSONSchema]? = nil,
+    description: String? = nil,
+    required: [String]? = nil,
+    enumValues: [MCPJSONValue]? = nil,
+    items: MCPJSONSchema? = nil,
+    additionalProperties: Bool? = nil,
+    minimum: Double? = nil,
+    maximum: Double? = nil,
+    exclusiveMinimum: Double? = nil,
+    exclusiveMaximum: Double? = nil,
+    minLength: Int? = nil,
+    maxLength: Int? = nil,
+    pattern: String? = nil,
+    format: String? = nil,
+    minItems: Int? = nil,
+    maxItems: Int? = nil,
+    uniqueItems: Bool? = nil
+  ) {
+    self.type = type
+    self.description = description
+    self.properties = properties
+    self.required = required
+    self.enumValues = enumValues
+    self.items = items
+    self.additionalProperties = additionalProperties
+    self.minimum = minimum
+    self.maximum = maximum
+    self.exclusiveMinimum = exclusiveMinimum
+    self.exclusiveMaximum = exclusiveMaximum
+    self.minLength = minLength
+    self.maxLength = maxLength
+    self.pattern = pattern
+    self.format = format
+    self.minItems = minItems
+    self.maxItems = maxItems
+    self.uniqueItems = uniqueItems
+  }
+
+  public static func == (lhs: MCPJSONSchema, rhs: MCPJSONSchema) -> Bool {
+    lhs.type == rhs.type
+      && lhs.description == rhs.description
+      && lhs.properties == rhs.properties
+      && lhs.required == rhs.required
+      && lhs.enumValues == rhs.enumValues
+      && lhs.items == rhs.items
+      && lhs.additionalProperties == rhs.additionalProperties
+      && lhs.minimum == rhs.minimum
+      && lhs.maximum == rhs.maximum
+      && lhs.exclusiveMinimum == rhs.exclusiveMinimum
+      && lhs.exclusiveMaximum == rhs.exclusiveMaximum
+      && lhs.minLength == rhs.minLength
+      && lhs.maxLength == rhs.maxLength
+      && lhs.pattern == rhs.pattern
+      && lhs.format == rhs.format
+      && lhs.minItems == rhs.minItems
+      && lhs.maxItems == rhs.maxItems
+      && lhs.uniqueItems == rhs.uniqueItems
+  }
+
+  public static func fromCapabilitySchemaJson(_ raw: String?) -> MCPJSONSchema {
     guard let raw,
           let data = raw.data(using: .utf8),
-          let decoded = try? JSONDecoder().decode(MCPInputSchema.self, from: data) else {
-      return MCPInputSchema(type: "object", properties: [:])
+          let decoded = try? JSONDecoder().decode(MCPJSONSchema.self, from: data) else {
+      return MCPJSONSchema(type: "object", properties: [:])
     }
     return decoded
   }
 }
 
-public struct MCPPropertySchema: Codable, Equatable, Sendable {
-  public let type: String?
-  public let description: String?
+public typealias MCPInputSchema = MCPJSONSchema
+public typealias MCPPropertySchema = MCPJSONSchema
 
-  public init(type: String?, description: String?) {
+public struct MCPToolTextContent: Codable, Equatable, Sendable {
+  public let type: String
+  public let text: String
+
+  public init(type: String = "text", text: String) {
     self.type = type
+    self.text = text
+  }
+}
+
+public struct MCPToolResourceLinkContent: Codable, Equatable, Sendable {
+  public let type: String
+  public let uri: String
+  public let name: String
+  public let title: String?
+  public let description: String?
+  public let mimeType: String?
+  public let size: Int?
+
+  public init(
+    type: String = "resource_link",
+    uri: String,
+    name: String,
+    title: String? = nil,
+    description: String? = nil,
+    mimeType: String? = nil,
+    size: Int? = nil
+  ) {
+    self.type = type
+    self.uri = uri
+    self.name = name
+    self.title = title
     self.description = description
+    self.mimeType = mimeType
+    self.size = size
+  }
+}
+
+public enum MCPToolContent: Codable, Equatable, Sendable {
+  case text(MCPToolTextContent)
+  case resourceLink(MCPToolResourceLinkContent)
+
+  private enum CodingKeys: String, CodingKey {
+    case type
+  }
+
+  private enum ContentType: String, Codable {
+    case text
+    case resourceLink = "resource_link"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch try container.decode(ContentType.self, forKey: .type) {
+    case .text:
+      self = .text(try MCPToolTextContent(from: decoder))
+    case .resourceLink:
+      self = .resourceLink(try MCPToolResourceLinkContent(from: decoder))
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    switch self {
+    case .text(let content):
+      try content.encode(to: encoder)
+    case .resourceLink(let content):
+      try content.encode(to: encoder)
+    }
+  }
+}
+
+public struct MCPToolCallResult: Codable, Equatable, Sendable {
+  public let content: [MCPToolContent]
+  public let structuredContent: MCPJSONValue?
+  public let isError: Bool?
+
+  public init(
+    content: [MCPToolContent],
+    structuredContent: MCPJSONValue? = nil,
+    isError: Bool? = nil
+  ) {
+    self.content = content
+    self.structuredContent = structuredContent
+    self.isError = isError
+  }
+
+  public init(text: String, structuredContent: MCPJSONValue? = nil, isError: Bool? = nil) {
+    self.init(
+      content: [.text(MCPToolTextContent(text: text))],
+      structuredContent: structuredContent,
+      isError: isError
+    )
   }
 }
 
