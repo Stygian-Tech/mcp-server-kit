@@ -33,6 +33,13 @@ import Testing
     #expect(decoded == request)
   }
 
+  @Test func preservesListCursorThroughRoundTrip() throws {
+    let payload = Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"page-2"}}"#.utf8)
+    let request = try JSONDecoder().decode(MCPRequest.self, from: payload)
+    #expect(request.params?.cursor == "page-2")
+    #expect(try JSONDecoder().decode(MCPRequest.self, from: JSONEncoder().encode(request)) == request)
+  }
+
   @Test func encodesInitializeResultWithCapabilities() throws {
     let result = MCPInitializeResult(
       protocolVersion: MCPProtocolVersion.negotiated(requested: "2024-11-05"),
@@ -198,10 +205,12 @@ import Testing
   }
 
   @Test func negotiatesLatestProtocolAndFallsBackForUnknownVersions() {
+    #expect(MCPProtocolVersion.negotiated(requested: "2025-03-26") == "2025-03-26")
     #expect(MCPProtocolVersion.negotiated(requested: "2025-11-25") == "2025-11-25")
     #expect(MCPProtocolVersion.negotiated(requested: " 2025-11-25 ") == "2025-11-25")
-    #expect(MCPProtocolVersion.negotiated(requested: "2099-01-01") == MCPProtocolVersion.fallback.rawValue)
-    #expect(MCPProtocolVersion.negotiated(requested: nil) == MCPProtocolVersion.fallback.rawValue)
+    #expect(MCPProtocolVersion.negotiated(requested: "2099-01-01") == MCPProtocolVersion.latest.rawValue)
+    #expect(MCPProtocolVersion.negotiated(requested: nil) == MCPProtocolVersion.latest.rawValue)
+    #expect(MCPProtocolVersion.missingHTTPHeaderFallback.rawValue == "2025-03-26")
   }
 
   @Test func encodesToolListCursorAndErrorData() throws {
