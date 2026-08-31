@@ -6,10 +6,18 @@ public enum MCPServerKitVersion {
 
 public enum MCPProtocolVersion: String, CaseIterable, Codable, Sendable {
   case v2024_11_05 = "2024-11-05"
+  case v2025_03_26 = "2025-03-26"
   case v2025_06_18 = "2025-06-18"
   case v2025_11_25 = "2025-11-25"
 
-  public static let fallback = v2024_11_05
+  /// Latest version this package implements. During initialization the server must answer with
+  /// its latest supported version when the client proposes an unsupported value.
+  public static let latest = v2025_11_25
+  public static let fallback = latest
+
+  /// Streamable HTTP compatibility version used when a subsequent request omits the version
+  /// header and the server does not retain negotiated session state.
+  public static let missingHTTPHeaderFallback = v2025_03_26
 
   public static func negotiated(requested: String?) -> String {
     let trimmed = requested?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -169,6 +177,7 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
   public let name: String?
   public let arguments: [String: MCPJSONValue]?
   public let uri: String?
+  public let cursor: String?
   public let protocolVersion: String?
 
   /// A compatibility view of scalar arguments used by pre-2025 handlers.
@@ -183,6 +192,7 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     case name
     case arguments
     case uri
+    case cursor
     case protocolVersion
   }
 
@@ -190,11 +200,13 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     name: String?,
     arguments: [String: MCPJSONValue]?,
     uri: String? = nil,
+    cursor: String? = nil,
     protocolVersion: String? = nil
   ) {
     self.name = name
     self.arguments = arguments
     self.uri = uri
+    self.cursor = cursor
     self.protocolVersion = protocolVersion
   }
 
@@ -203,12 +215,14 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     name: String?,
     arguments: [String: String],
     uri: String? = nil,
+    cursor: String? = nil,
     protocolVersion: String? = nil
   ) {
     self.init(
       name: name,
       arguments: arguments.mapValues(MCPJSONValue.string),
       uri: uri,
+      cursor: cursor,
       protocolVersion: protocolVersion
     )
   }
@@ -217,6 +231,7 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     name = try container.decodeIfPresent(String.self, forKey: .name)
     uri = try container.decodeIfPresent(String.self, forKey: .uri)
+    cursor = try container.decodeIfPresent(String.self, forKey: .cursor)
     protocolVersion = try container.decodeIfPresent(String.self, forKey: .protocolVersion)
     arguments = try container.decodeIfPresent([String: MCPJSONValue].self, forKey: .arguments)
   }
@@ -226,6 +241,7 @@ public struct MCPRequestParams: Codable, Equatable, Sendable {
     try container.encodeIfPresent(name, forKey: .name)
     try container.encodeIfPresent(arguments, forKey: .arguments)
     try container.encodeIfPresent(uri, forKey: .uri)
+    try container.encodeIfPresent(cursor, forKey: .cursor)
     try container.encodeIfPresent(protocolVersion, forKey: .protocolVersion)
   }
 
